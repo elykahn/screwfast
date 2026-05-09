@@ -20,39 +20,49 @@ function stripHtml(html: string): string {
     .trim();
 }
 
-export async function getMetroId(
-  query: string,
-  songkickKey: string
-): Promise<{ id: number; name: string } | null> {
-  const res = await fetch(
-    `https://api.songkick.com/api/3.0/search/locations.json?query=${encodeURIComponent(query)}&apikey=${songkickKey}`
-  );
-  if (!res.ok) return null;
-  const data = await res.json();
-  const locations: any[] = data?.resultsPage?.results?.location ?? [];
-  if (!locations.length) return null;
-  return {
-    id: locations[0].metroArea.id,
-    name: locations[0].metroArea.displayName,
-  };
+function pickImage(event: any): string {
+  const attractionImgs: any[] = event._embedded?.attractions?.[0]?.images ?? [];
+  const eventImgs: any[] = event.images ?? [];
+  const all = [...attractionImgs, ...eventImgs];
+  const img =
+    all.find((i) => i.ratio === "16_9" && i.width >= 1024 && !i.fallback) ??
+    all.find((i) => i.ratio === "16_9" && !i.fallback) ??
+    all.find((i) => !i.fallback) ??
+    all[0];
+  return img?.url ?? "";
 }
 
-export async function getUpcomingEvents(
-  metroId: number,
-  songkickKey: string
+function tmGenreTags(event: any): string[] {
+  return (event.classifications ?? [])
+    .flatMap((c: any) => [c.genre?.name, c.subGenre?.name])
+    .filter((g: string | undefined) => g && g !== "Undefined");
+}
+
+export async function getTicketmasterEvents(
+  postalCode: string,
+  apiKey: string
 ): Promise<any[]> {
+  const params = new URLSearchParams({
+    apikey: apiKey,
+    postalCode,
+    classificationName: "music",
+    sort: "date,asc",
+    size: "50",
+    radius: "50",
+    unit: "miles",
+  });
   const res = await fetch(
-    `https://api.songkick.com/api/3.0/metro_areas/${metroId}/calendar.json?apikey=${songkickKey}&per_page=50`
+    `https://app.ticketmaster.com/discovery/v2/events.json?${params}`
   );
   if (!res.ok) return [];
   const data = await res.json();
-  return data?.resultsPage?.results?.event ?? [];
+  return data?._embedded?.events ?? [];
 }
 
 export async function getArtistData(
   artistName: string,
   lastfmKey: string
-): Promise<{ bio: string; tags: string[]; imageUrl: string; topTracks: string[] }> {
+): Promise<{ bio: string; tags: string[]; topTracks: string[] }> {
   const base = "https://ws.audioscrobbler.com/2.0/";
   const [infoRes, tracksRes] = await Promise.all([
     fetch(
@@ -70,14 +80,32 @@ export async function getArtistData(
   const tags = ((info?.artist?.tags?.tag ?? []) as any[])
     .slice(0, 6)
     .map((t) => t.name as string);
-  // Last.fm deprecated image serving; filter out the known placeholder hash
-  const imageUrl =
-    ((info?.artist?.image ?? []) as any[])
-      .find((img) => img.size === "extralarge" && img["#text"] && !img["#text"].includes("2a96cbd8b46e442fc41c2b86b821562f"))
-      ?.["#text"] ?? "";
   const topTracks = ((tracks?.toptracks?.track ?? []) as any[])
     .slice(0, 5)
     .map((t) => t.name as string);
 
-  return { bio, tags, imageUrl, topTracks };
+  return { bio, tags, topTracks };
+}
+
+export function buildConcert(event: any, lastfm: { bio: string; tags: string[]; topTracks: string[] }): Concert {
+  const artistName: string =
+    event._embedded?.attractions?.[0]?.name ?? event.name;
+  const venue = event._embedded?.venues?.[0];
+
+  // Merge Last.fm tags with Ticketmaster classifications; Last.fm wins if present
+  const tags = lastfm.tags.length > 0 ? lastfm.tags : tmGenreTags(event);
+
+  return {
+    id: event.id,
+    artistName,
+    venue: venue?.name ?? "TBD",
+    city: venue ? `${venue.city?.name ?? ""}, ${venue.state?.stateCode ?? ""}`.replace(/^, |, $/, "") : "",
+    date: event.dates?.start?.localDate ?? "",
+    time: event.dates?.start?.timeTBD ? "" : (event.dates?.start?.localTime ?? ""),
+    ticketUrl: event.url ?? "",
+    bio: lastfm.bio,
+    topTracks: lastfm.topTracks,
+    tags,
+    imageUrl: pickImage(event),
+  };
 }

@@ -1,9 +1,9 @@
 ---
 import MainLayout from "@/layouts/MainLayout.astro";
-import { getMetroId, getUpcomingEvents, getArtistData } from "@utils/concertApi";
+import { getTicketmasterEvents, getArtistData, buildConcert } from "@utils/concertApi";
 import type { Concert } from "@utils/concertApi";
 
-const SONGKICK_KEY = import.meta.env.SONGKICK_API_KEY;
+const TICKETMASTER_KEY = import.meta.env.TICKETMASTER_API_KEY;
 const LASTFM_KEY = import.meta.env.LASTFM_API_KEY;
 const ZIP_CODE = "72202";
 
@@ -11,58 +11,45 @@ let concerts: Concert[] = [];
 let error: string | null = null;
 let metroName = "your area";
 
-if (!SONGKICK_KEY || !LASTFM_KEY) {
+if (!TICKETMASTER_KEY || !LASTFM_KEY) {
   error =
-    "Configure SONGKICK_API_KEY and LASTFM_API_KEY in your .env file to load concerts. See .env.example for instructions.";
+    "Configure TICKETMASTER_API_KEY and LASTFM_API_KEY in your .env file to load concerts. See .env.example for instructions.";
 } else {
   try {
-    const metro = await getMetroId(ZIP_CODE, SONGKICK_KEY);
-    if (!metro) {
-      error = `Could not find a metro area for ZIP ${ZIP_CODE}.`;
-    } else {
-      metroName = metro.name;
-      const events = await getUpcomingEvents(metro.id, SONGKICK_KEY);
+    const events = await getTicketmasterEvents(ZIP_CODE, TICKETMASTER_KEY);
 
-      // Deduplicate — one card per artist, earliest event wins
-      const seen = new Set<string>();
-      const uniqueEvents: any[] = [];
-      for (const event of events) {
-        const artist = event.performance?.[0]?.artist?.displayName;
-        if (!artist || seen.has(artist)) continue;
-        seen.add(artist);
-        uniqueEvents.push(event);
-      }
-
-      // Enrich up to 25 artists in parallel with Last.fm data
-      const slice = uniqueEvents.slice(0, 25);
-      const enriched = await Promise.allSettled(
-        slice.map((event) =>
-          getArtistData(event.performance[0].artist.displayName, LASTFM_KEY)
-        )
-      );
-
-      concerts = slice.map((event, i) => {
-        const artistName = event.performance[0].artist.displayName as string;
-        const info =
-          enriched[i].status === "fulfilled"
-            ? enriched[i].value
-            : { bio: "", tags: [], imageUrl: "", topTracks: [] };
-
-        return {
-          id: String(event.id),
-          artistName,
-          venue: event.venue?.displayName ?? "TBD",
-          city: event.location?.city ?? "",
-          date: event.start?.date ?? "",
-          time: event.start?.time ?? "",
-          ticketUrl: event.uri ?? "",
-          bio: info.bio,
-          topTracks: info.topTracks,
-          tags: info.tags,
-          imageUrl: info.imageUrl,
-        };
-      });
+    // Derive metro name from first venue
+    const firstVenue = events[0]?._embedded?.venues?.[0];
+    if (firstVenue?.city?.name) {
+      metroName = `${firstVenue.city.name}, ${firstVenue.state?.stateCode ?? ""}`.replace(/, $/, "");
     }
+
+    // Deduplicate — one card per artist, earliest event wins
+    const seen = new Set<string>();
+    const uniqueEvents: any[] = [];
+    for (const event of events) {
+      const artist = event._embedded?.attractions?.[0]?.name ?? event.name;
+      if (!artist || seen.has(artist)) continue;
+      seen.add(artist);
+      uniqueEvents.push(event);
+    }
+
+    // Enrich up to 25 artists in parallel with Last.fm bio + top tracks
+    const slice = uniqueEvents.slice(0, 25);
+    const enriched = await Promise.allSettled(
+      slice.map((event) => {
+        const artistName = event._embedded?.attractions?.[0]?.name ?? event.name;
+        return getArtistData(artistName, LASTFM_KEY);
+      })
+    );
+
+    concerts = slice.map((event, i) => {
+      const lastfm =
+        enriched[i].status === "fulfilled"
+          ? enriched[i].value
+          : { bio: "", tags: [], topTracks: [] };
+      return buildConcert(event, lastfm);
+    });
   } catch (err) {
     error = `Failed to load concerts: ${String(err)}`;
   }
